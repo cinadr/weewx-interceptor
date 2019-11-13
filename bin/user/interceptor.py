@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # Copyright 2016 Matthew Wall, all rights reserved
 # Distributed under the terms of the GNU Public License (GPLv3)
 
@@ -195,10 +194,10 @@ To run a sniffer, specify an interface and filter.  For example:
 # FIXME: automatically detect the traffic type
 # FIXME: default acurite mapping confuses multiple tower sensors
 
-from __future__ import with_statement
-import BaseHTTPServer
-import SocketServer
-import Queue
+
+import http.server
+import socketserver
+import queue
 import binascii
 import calendar
 import fnmatch
@@ -207,7 +206,7 @@ import string
 import syslog
 import threading
 import time
-import urlparse
+import urllib.parse
 
 import weewx.drivers
 import weeutil.weeutil
@@ -270,7 +269,7 @@ class Consumer(object):
     Sniffing is not available for every type of hardware.
     """
 
-    queue = Queue.Queue()
+    queue = queue.Queue()
 
     def __init__(self, parser, mode='listen',
                  address=DEFAULT_ADDR, port=DEFAULT_PORT, handler=None,
@@ -399,7 +398,7 @@ class Consumer(object):
                         self.flush()
                     else:
                         printable = set(string.printable)
-                        fdata = filter(lambda x: x in printable, _data)
+                        fdata = [x for x in _data if x in printable]
                         if fdata == _data:
                             logdbg("sniff: append %s" % _fmt_bytes(_data))
                             self.data_buffer += _data
@@ -417,7 +416,7 @@ class Consumer(object):
             data = self.data_buffer
             # if this is a query string, parse it
             if '?' in data:
-                data = urlparse.urlparse(data).query
+                data = urllib.parse.urlparse(data).query
             # trim any dangling HTTP/x.x and connection info
             idx = data.find(' HTTP')
             if idx >= 0:
@@ -429,7 +428,7 @@ class Consumer(object):
             self.data_buffer = ''
 
 
-    class TCPServer(Server, SocketServer.TCPServer):
+    class TCPServer(Server, socketserver.TCPServer):
         daemon_threads = True
         allow_reuse_address = True
 
@@ -437,7 +436,7 @@ class Consumer(object):
             if handler is None:
                 handler = Consumer.Handler
             loginf("listen on %s:%s" % (address, port))
-            SocketServer.TCPServer.__init__(self, (address, int(port)), handler)
+            socketserver.TCPServer.__init__(self, (address, int(port)), handler)
 
         def run(self):
             logdbg("start tcp server")
@@ -448,19 +447,31 @@ class Consumer(object):
             self.shutdown()
             self.server_close()
 
-    class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+    class Handler(http.server.BaseHTTPRequestHandler):
 
         def get_response(self):
             # default reply is a simple 'OK' string
-            return 'OK'
+            return 'OK\n'
 
         def reply(self):
             # standard reply is HTTP code of 200 and the response string
-            response = bytes(self.get_response())
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(response)))
+            response = bytes(self.get_response(), encoding='utf8')
+            # self.server_version = ""
+            # self.sys_version = ""
+            self.protocol_version = "HTTP/1.1"
+
+            # self.send_response(200)
+            self.log_request(200)         
+            self.send_response_only(200)
+            # self.send_header('Server', self.version_string())         
+            self.send_header('Date', self.date_time_string())
+
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(response)+1))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(response)            
+            self.wfile.write(b'\x0a')
 
         def do_POST(self):
             # get the payload from an HTTP POST
@@ -475,7 +486,7 @@ class Consumer(object):
 
         def do_GET(self):
             # get the query string from an HTTP GET
-            data = urlparse.urlparse(self.path).query
+            data = urllib.parse.urlparse(self.path).query
             logdbg('GET: %s' % _obfuscate_passwords(data))
             Consumer.queue.put(data)
             self.reply()
@@ -505,7 +516,7 @@ class Consumer(object):
             if 'usUnits' in pkt:
                 packet['usUnits'] = pkt['usUnits']
             for n in sensor_map:
-                label = Consumer.Parser._find_match(sensor_map[n], pkt.keys())
+                label = Consumer.Parser._find_match(sensor_map[n], list(pkt.keys()))
                 if label:
                     packet[n] = pkt.get(label)
             return packet
@@ -692,7 +703,7 @@ class WUClient(Consumer):
                     pkt['rain'] = self._delta_rain(newtot, self._last_rain)
                     self._last_rain = newtot
 
-            except ValueError, e:
+            except ValueError as e:
                 logerr("parse failed for %s: %s" % (s, e))
             return pkt
 
@@ -927,7 +938,7 @@ class AcuriteBridge(Consumer):
                         logdbg("ignored parameter %s=%s" % (n, val))
                     else:
                         loginf("unrecognized parameter %s=%s" % (n, data[n]))
-            except ValueError, e:
+            except ValueError as e:
                 logerr("parse failed for %s: %s" % (s, e))
             # convert rainfall to a delta
             if 'rainfall' in pkt:
@@ -981,7 +992,7 @@ class AcuriteBridge(Consumer):
                         pkt[n] = int(v, 16)
                     else:
                         loginf("unknown element '%s' with value '%s'" % (n, v))
-                except (ValueError, IndexError), e:
+                except (ValueError, IndexError) as e:
                     logerr("decode failed for %s '%s': %s" % (n, v, e))
 
             # if this is a pressure packet, calculate the pressure
@@ -1285,7 +1296,7 @@ class Observer(Consumer):
                 if 'luminosity' in pkt and not 'radiation' in pkt:
                     lum2rad = 0.01075 # lux to W/m^2 (approximation)
                     pkt['radiation'] = pkt['luminosity'] * lum2rad
-            except ValueError, e:
+            except ValueError as e:
                 logerr("parse failed for %s: %s" % (s, e))
             return pkt
 
@@ -1409,7 +1420,7 @@ class LW30x(Consumer):
                         pkt[n] = self.decode_float(data[n])
                     else:
                         pkt[n] = data[n]
-            except ValueError, e:
+            except ValueError as e:
                 logerr("parse failed for %s: %s" % (s, e))
 
             # convert rain from inches to mm
@@ -2013,7 +2024,7 @@ class GW1000U(Consumer):
                     pkt = self.parse_history(s)
                 else:
                     loginf("unhandled data len=%s (%s)" % (len(s), s))
-            except ValueError, e:
+            except ValueError as e:
                 logerr("parse failed for %s: %s" % (payload, e))
             # now tag each value with identifiers
             mac = payload.get('mac')
@@ -2179,7 +2190,7 @@ class InterceptorConfigurationEditor(weewx.drivers.AbstractConfEditor):
 """
 
     def prompt_for_settings(self):
-        print "Specify the type of device whose data will be captured"
+        print("Specify the type of device whose data will be captured")
         device_type = self._prompt(
             'device_type', 'acurite-bridge',
             ['acurite-bridge', 'observer', 'lw30x', 'lacrosse-bridge', 'wu-client'])
@@ -2235,7 +2246,7 @@ class InterceptorDriver(weewx.drivers.AbstractDevice):
                     yield pkt
                 else:
                     logdbg("skipping bogus packet %s ('%s')" % (pkt, data))
-            except Queue.Empty:
+            except queue.Empty:
                 logdbg('empty queue')
 
 
@@ -2289,7 +2300,7 @@ if __name__ == '__main__':
     (options, args) = parser.parse_args()
 
     if options.version:
-        print "driver version is %s" % DRIVER_VERSION
+        print("driver version is %s" % DRIVER_VERSION)
         exit(0)
 
     debug = False
@@ -2302,7 +2313,7 @@ if __name__ == '__main__':
 
     if options.parse_gw1000u:
         parser = GW1000U.Parser()
-        print parser.parse({'mac': 'tester', 'data': options.data})
+        print(parser.parse({'mac': 'tester', 'data': options.data}))
         exit(0)
 
     if options.test_gw1000u_response:
@@ -2314,24 +2325,24 @@ if __name__ == '__main__':
         sensor_interval = GW1000U.sensor_interval
         history_interval = GW1000U.history_interval_idx
         last_history_address = GW1000U.Handler.last_history_address
-        print "ts:", ts
-        print "serial:", serial
-        print "server:", server
-        print "ping_interval:", ping_interval
-        print "brightness:", brightness
-        print "sensor_interval:", sensor_interval
-        print "history_interval:", history_interval
-        print "last_address:", last_history_address
-        print "gateway_reg_response:", _fmt_bytes(GW1000U.Handler._create_gateway_reg_response(server))
-        print "gateway_ping_response:", _fmt_bytes(GW1000U.Handler._create_gateway_ping_response(ping_interval))
-        print "station_reg_response:", _fmt_bytes(GW1000U.Handler._create_station_reg_response(ts, serial, brightness))
-        print "station_ping_response:", _fmt_bytes(GW1000U.Handler._create_station_ping_response(ts, serial, sensor_interval, history_interval, brightness, last_history_address))
+        print("ts:", ts)
+        print("serial:", serial)
+        print("server:", server)
+        print("ping_interval:", ping_interval)
+        print("brightness:", brightness)
+        print("sensor_interval:", sensor_interval)
+        print("history_interval:", history_interval)
+        print("last_address:", last_history_address)
+        print("gateway_reg_response:", _fmt_bytes(GW1000U.Handler._create_gateway_reg_response(server)))
+        print("gateway_ping_response:", _fmt_bytes(GW1000U.Handler._create_gateway_ping_response(ping_interval)))
+        print("station_reg_response:", _fmt_bytes(GW1000U.Handler._create_station_reg_response(ts, serial, brightness)))
+        print("station_ping_response:", _fmt_bytes(GW1000U.Handler._create_station_ping_response(ts, serial, sensor_interval, history_interval, brightness, last_history_address)))
         exit(0)
 
     if not options.device_type in InterceptorDriver.DEVICE_TYPES:
         raise Exception("unsupported device type '%s'.  options include %s" %
                         (options.device_type,
-                         ', '.join(InterceptorDriver.DEVICE_TYPES.keys())))
+                         ', '.join(list(InterceptorDriver.DEVICE_TYPES.keys()))))
 
     device = InterceptorDriver.DEVICE_TYPES.get(options.device_type)(
         mode=options.mode,
@@ -2346,12 +2357,12 @@ if __name__ == '__main__':
     while True:
         try:
             _data = device.get_queue().get(True, 10)
-            print 'identifiers:', device.parser.parse_identifiers(_data)
+            print('identifiers:', device.parser.parse_identifiers(_data))
             if debug:
-                print 'raw data: %s' % _data
+                print('raw data: %s' % _data)
                 _pkt = device.parser.parse(_data)
-                print 'raw packet: %s' % _pkt
+                print('raw packet: %s' % _pkt)
                 _pkt = device.parser.map_to_fields(_pkt, None)
-                print 'mapped packet: %s' % _pkt
-        except Queue.Empty:
+                print('mapped packet: %s' % _pkt)
+        except queue.Empty:
             logdbg("empty queue")
